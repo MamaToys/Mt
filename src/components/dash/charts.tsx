@@ -85,8 +85,8 @@ export function SalesSpendChart({ data, currency }: { data: SeriesPoint[]; curre
             )}
           />
           <Legend iconType="plainline" wrapperStyle={{ fontSize: 12, color: "var(--muted-foreground)" }} />
-          <Line type="monotone" dataKey="netSales" name="Shopify net sales" stroke="var(--series-1)" strokeWidth={2} dot={data.length < 32 ? { r: 3 } : false} activeDot={{ r: 5 }} connectNulls={false} />
-          <Line type="monotone" dataKey="metaSpend" name="Meta spend" stroke="var(--series-2)" strokeWidth={2} dot={data.length < 32 ? { r: 3 } : false} activeDot={{ r: 5 }} connectNulls={false} />
+          <Line type="monotone" dataKey="netSales" name="Shopify net sales" stroke="var(--series-1)" strokeWidth={2} dot={data.length < 32 ? { r: 3 } : false} activeDot={{ r: 5 }} connectNulls={false} animationDuration={500} />
+          <Line type="monotone" dataKey="metaSpend" name="Meta spend" stroke="var(--series-2)" strokeWidth={2} dot={data.length < 32 ? { r: 3 } : false} activeDot={{ r: 5 }} connectNulls={false} animationDuration={500} />
         </LineChart>
       </ResponsiveContainer>
     </div>
