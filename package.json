@@ -13,8 +13,9 @@
     "test:watch": "vitest",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
-    "db:seed-demo": "tsx prisma/seed-demo.ts",
-    "postinstall": "prisma generate"
+    "db:seed-demo": "tsx --conditions=react-server prisma/seed-demo.ts",
+    "postinstall": "prisma generate",
+    "sync": "tsx --conditions=react-server scripts/sync.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",

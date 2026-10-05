@@ -187,6 +187,13 @@ export async function rebuildRollups(storeId: string, from: DateStr, to: DateStr
       }
     }
 
+    if (!s.utmAttributionEnabled) {
+      await db.shopifyOrder.updateMany({
+        where: { storeId, attributedCampaignId: { not: null } },
+        data: { attributedCampaignId: null, attributedAdSetId: null, attributedAdId: null },
+      });
+    }
+
     const ledger = buildLedger(ledgerData.orders, costOf);
     const cov = shopifyCoverage(store.shopifyConnection, tz);
 

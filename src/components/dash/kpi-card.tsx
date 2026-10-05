@@ -27,7 +27,7 @@ export function KpiCard({ label, value, change, upIsGood = true, definition, sub
         <span>{label}</span>
         <InfoTip>{definition}</InfoTip>
       </div>
-      <div className={cn("text-2xl font-semibold leading-tight", value === "N/A" && "text-subtle")}>{value}</div>
+      <div className={cn("text-2xl font-semibold leading-tight tabular", value === "N/A" && "text-subtle")}>{value}</div>
       {compareLabel !== null && (
         <div className="flex items-center gap-1 text-xs">
           {hasChange ? (
@@ -39,7 +39,7 @@ export function KpiCard({ label, value, change, upIsGood = true, definition, sub
           ) : (
             <span className="text-subtle">No comparison (N/A)</span>
           )}
-          {hasChange && <span className="text-subtle">vs comparison</span>}
+          {hasChange && <span className="text-subtle">vs comp.</span>}
         </div>
       )}
       {sub && <div className="text-xs text-muted-foreground">{sub}</div>}

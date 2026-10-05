@@ -92,6 +92,7 @@ export interface Kpis {
   shippingCost: number | null;
   paymentFees: number | null;
   otherExpenses: number | null;
+  variableExpenses: number | null;
   metaSpend: number | null;
   metaPurchases: number | null;
   metaPurchaseValue: number | null;
@@ -168,6 +169,7 @@ export function computeKpis(t: Totals, opts: KpiOptions): Kpis {
     shippingCost: t.shippingCost,
     paymentFees: t.paymentFees,
     otherExpenses: t.otherExpenses,
+    variableExpenses: t.variableExpenses,
     metaSpend: t.metaSpend,
     metaPurchases: t.metaPurchases,
     metaPurchaseValue: t.metaPurchaseValue,

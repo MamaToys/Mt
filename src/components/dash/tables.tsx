@@ -9,6 +9,20 @@ export interface BucketRow {
   label: string;
   kpis: Kpis;
   complete: boolean; // false when any day lacks Shopify or Meta data
+  /** Bucket covers only part of its week/month (range edge or today). */
+  partial: boolean;
+  /** At least one day in the bucket has Shopify or Meta data. */
+  hasData: boolean;
+}
+
+function Label({ r }: { r: BucketRow }) {
+  return (
+    <>
+      {r.label}
+      {r.partial && <span className="ml-1 text-xs text-subtle">(partial)</span>}
+      {!r.complete && <span className="ml-1 text-warning" title="Some source data unavailable in this period">⚠</span>}
+    </>
+  );
 }
 
 const otherCosts = (k: Kpis) =>
@@ -47,7 +61,7 @@ export function DailyTable({ rows, currency }: { rows: BucketRow[]; currency: st
           const k = r.kpis;
           return (
             <TR key={r.key}>
-              <TD className="font-medium">{r.label}{!r.complete && <span title="Some source data unavailable for this day" className="ml-1 text-warning">⚠</span>}</TD>
+              <TD className="font-medium"><Label r={r} /></TD>
               <TD className={R}>{formatMoney(k.grossSales, currency)}</TD>
               <TD className={cn(R, "font-medium")}>{formatMoney(k.netSales, currency)}</TD>
               <TD className={R}>{formatNumber(k.orders)}</TD>
@@ -89,11 +103,11 @@ export function WeeklyTable({ rows, currency }: { rows: BucketRow[]; currency: s
         </TR>
       </THead>
       <TBody>
-        {rows.map((r, i) => ({ r, p: i > 0 ? rows[i - 1].kpis : null })).reverse().map(({ r, p }) => {
+        {rows.map((r, i) => ({ r, p: i > 0 && !r.partial && !rows[i - 1].partial ? rows[i - 1].kpis : null })).reverse().map(({ r, p }) => {
           const k = r.kpis;
           return (
             <TR key={r.key}>
-              <TD className="font-medium">{r.label}{!r.complete && <span className="ml-1 text-warning" title="Partial week or missing source data">⚠</span>}</TD>
+              <TD className="font-medium"><Label r={r} /></TD>
               <TD className={R}>{formatMoney(k.netSales, currency)}</TD>
               <TD className={R}>{formatNumber(k.orders)}</TD>
               <TD className={R}>{formatMoney(k.metaSpend, currency)}</TD>
@@ -135,11 +149,11 @@ export function MonthlyTable({ rows, currency }: { rows: BucketRow[]; currency: 
         </TR>
       </THead>
       <TBody>
-        {rows.map((r, i) => ({ r, p: i > 0 ? rows[i - 1].kpis : null })).reverse().map(({ r, p }) => {
+        {rows.map((r, i) => ({ r, p: i > 0 && !r.partial && !rows[i - 1].partial ? rows[i - 1].kpis : null })).reverse().map(({ r, p }) => {
           const k = r.kpis;
           return (
             <TR key={r.key}>
-              <TD className="font-medium">{r.label}{!r.complete && <span className="ml-1 text-warning" title="Partial month or missing source data">⚠</span>}</TD>
+              <TD className="font-medium"><Label r={r} /></TD>
               <TD className={R}>{formatMoney(k.grossSales, currency)}</TD>
               <TD className={R}>{formatMoney(k.netSales, currency)}</TD>
               <TD className={R}>{formatNumber(k.orders)}</TD>

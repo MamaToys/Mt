@@ -29,7 +29,7 @@ export function KpiRow({ k, prev, currency, compareLabel }: { k: Kpis; prev: Kpi
   const ch = (key: keyof Kpis) => (prev ? F.pctChange(k[key] as number | null, prev[key] as number | null) : null);
   const cl = compareLabel;
   return (
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-4 min-[1800px]:grid-cols-8">
       <KpiCard label="Gross Sales" value={formatMoney(k.grossSales, currency)} change={ch("grossSales")} definition={DEFS.grossSales} compareLabel={cl} />
       <KpiCard label="Net Sales" value={formatMoney(k.netSales, currency)} change={ch("netSales")} definition={DEFS.netSales} compareLabel={cl} emphasis />
       <KpiCard label="Meta Ad Spend" value={formatMoney(k.metaSpend, currency)} change={ch("metaSpend")} upIsGood={false} definition={DEFS.metaSpend} compareLabel={cl} />

@@ -457,7 +457,7 @@ export async function loadFreshness(storeId: string) {
     db.syncLog.findFirst({ where: { storeId, platform: "SYSTEM", syncType: "rollup", status: "COMPLETED" }, orderBy: { completedAt: "desc" } }),
   ]);
   return {
-    shopify: shop
+    shopify: shop && shop.status !== "DISCONNECTED"
       ? {
           status: shop.status,
           lastSyncAt: shop.lastSyncAt,
@@ -467,7 +467,7 @@ export async function loadFreshness(storeId: string) {
           webhooks: !!shop.webhooksRegisteredAt,
         }
       : null,
-    meta: meta
+    meta: meta && meta.status !== "DISCONNECTED"
       ? {
           status: meta.status,
           lastSyncAt: meta.lastSyncAt,
