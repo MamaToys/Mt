@@ -1,7 +1,7 @@
 import { Suspense } from "react";
 import { requireStore } from "@/lib/session";
 import { parseView, SearchParams } from "@/lib/params";
-import { loadProducts } from "@/lib/reports/queries";
+import { loadProducts, shopifyCovered } from "@/lib/reports/queries";
 import { db } from "@/lib/db";
 import { fromDbDate } from "@/lib/metrics/dates";
 import { formatMoney, formatNumber, formatPct } from "@/lib/format";
@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input, Field } from "@/components/ui/input";
 import { ActionForm } from "@/components/ui/action-form";
 import { ExportLinks } from "@/components/dash/export-links";
-import { Notes, PageHeader } from "@/components/dash/notices";
+import { Gaps, Notes, PageHeader } from "@/components/dash/notices";
 import { deleteProductCost, saveProductCost } from "@/app/actions";
 import { CostRowForm } from "./cost-row";
 
@@ -20,7 +20,7 @@ export const dynamic = "force-dynamic";
 export default async function ProductsPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const { store } = await requireStore();
   const view = parseView(await searchParams, store);
-  const [products, variants, soldVariants, costs] = await Promise.all([
+  const [products, variants, soldVariants, costs, covered] = await Promise.all([
     loadProducts(store.id, view.range),
     db.shopifyVariant.findMany({ where: { product: { storeId: store.id } }, include: { product: true }, orderBy: { product: { title: "asc" } }, take: 1000 }),
     db.shopifyOrderLineItem.groupBy({
@@ -29,6 +29,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
       _sum: { quantity: true },
     }),
     db.productCost.findMany({ where: { storeId: store.id }, orderBy: { effectiveFrom: "desc" } }),
+    shopifyCovered(store.id, view.range),
   ]);
   const c = store.currency;
   const manualBy = new Map<string, typeof costs>();
@@ -67,6 +68,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
       <PageHeader title="Products" description={`Product profitability · ${view.label}`}>
         <Suspense><ExportLinks reports={[{ id: "products", label: "Product CSV" }]} /></Suspense>
       </PageHeader>
+      {!covered && <Gaps gaps={["Shopify data is not complete for every day in this range (initial import still running or days before your imported history). Product totals below cover only the complete days."]} />}
       <Notes notes={["Product-level advertising allocation is unavailable: Meta spend cannot be reliably attributed to individual products, so product profit here is gross profit (net sales − product cost) before ads and overhead."]} />
       <Card>
         <CardHeader><CardTitle>Product profitability</CardTitle><CardDescription>Returns are counted on the refund date; restocked units reverse their cost.</CardDescription></CardHeader>

@@ -121,6 +121,7 @@ model Store {
   aiAnalyses         AIAnalysis[]
   alerts             Alert[]
   webhookEvents      WebhookEvent[]
+  exchangeRates      ExchangeRate[]
 }
 
 model StoreMember {
@@ -643,6 +644,8 @@ model Expense {
 /// only converted when a rate exists for that date (or the nearest prior date).
 model ExchangeRate {
   id        String   @id @default(cuid())
+  storeId   String
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
   base      String
   quote     String
   date      DateTime @db.Date
@@ -651,7 +654,7 @@ model ExchangeRate {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([base, quote, date])
+  @@unique([storeId, base, quote, date])
 }
 
 // ─────────────────────────────── Rollups ──────────────────────────────────────
@@ -731,6 +734,10 @@ model CampaignDailyMetric {
   shopifyNetSales    Decimal  @default(0) @db.Decimal(18, 4)
   shopifyProductCost Decimal  @default(0) @db.Decimal(18, 4)
   shopifyUnitsMissingCost Int @default(0)
+  /// Σ order totals / shipping charged / fee-bearing orders of attributed orders (for variable costs).
+  shopifyOrderTotals Decimal  @default(0) @db.Decimal(18, 4)
+  shopifyShippingCharged Decimal @default(0) @db.Decimal(18, 4)
+  shopifyFeeOrders   Int      @default(0)
   fxMissing          Boolean  @default(false)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt

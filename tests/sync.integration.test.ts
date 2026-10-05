@@ -24,6 +24,8 @@ type Mods = {
   queries: typeof import("@/lib/reports/queries");
   dates: typeof import("@/lib/metrics/dates");
   oauth: typeof import("@/lib/shopify/oauth");
+  integrations: typeof import("@/lib/integrations");
+  timezone: typeof import("@/lib/sync/timezone");
 };
 let M: Mods;
 let storeId: string;
@@ -79,6 +81,7 @@ function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
       const o = shopOrders[body.variables.id.split("/").pop()!];
       return json({ data: { order: o ? { ...o, lineItems: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: o.lineItems.nodes } } : null } });
     }
+    if (body.query.includes("query Shop")) return json({ data: { shop: { name: url.hostname, currencyCode: "USD", ianaTimezone: TZ, myshopifyDomain: url.hostname } } });
     if (body.query.includes("query Variants")) return json({ data: { productVariants: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } });
     throw new Error(`Unmocked Shopify query: ${body.query.slice(0, 50)}`);
   }
@@ -119,12 +122,13 @@ d("sync engine (Postgres + mocked APIs)", () => {
       queries: await import("@/lib/reports/queries"),
       dates: await import("@/lib/metrics/dates"),
       oauth: await import("@/lib/shopify/oauth"),
+      integrations: await import("@/lib/integrations"),
+      timezone: await import("@/lib/sync/timezone"),
     };
   });
 
   beforeEach(async () => {
-    await M.db.store.deleteMany({ where: { name: "TEST STORE" } });
-    await M.db.exchangeRate.deleteMany({});
+    await M.db.store.deleteMany({ where: { name: { in: ["TEST STORE", "OTHER STORE"] } } });
     const store = await M.db.store.create({ data: { name: "TEST STORE", currency: "USD", timezone: TZ } });
     storeId = store.id;
     await M.db.shopifyConnection.create({
@@ -135,7 +139,7 @@ d("sync engine (Postgres + mocked APIs)", () => {
   });
 
   afterAll(async () => {
-    await M?.db.store.deleteMany({ where: { name: "TEST STORE" } });
+    await M?.db.store.deleteMany({ where: { name: { in: ["TEST STORE", "OTHER STORE"] } } });
     await M?.db.$disconnect();
     vi.unstubAllGlobals();
   });
@@ -236,8 +240,8 @@ d("sync engine (Postgres + mocked APIs)", () => {
     expect(rows[0].metaSpend).toBeNull();
     expect(rows[0].metaFxMissing).toBe(true);
 
-    await M.db.exchangeRate.create({ data: { base: "EUR", quote: "USD", date: M.dates.toDbDate(M.dates.addDays(today, -40)), rate: 1.1 } });
-    await M.db.exchangeRate.create({ data: { base: "EUR", quote: "USD", date: M.dates.toDbDate(M.dates.addDays(today, -7)), rate: 1.1 } });
+    await M.db.exchangeRate.create({ data: { storeId, base: "EUR", quote: "USD", date: M.dates.toDbDate(M.dates.addDays(today, -40)), rate: 1.1 } });
+    await M.db.exchangeRate.create({ data: { storeId, base: "EUR", quote: "USD", date: M.dates.toDbDate(M.dates.addDays(today, -7)), rate: 1.1 } });
     await M.rollup.rebuildAll(storeId, "test");
     rows = (await M.queries.loadDailyRows(storeId, { from: day, to: day })).rows;
     expect(rows[0].metaSpend).toBeCloseTo(110);
@@ -259,5 +263,52 @@ d("sync engine (Postgres + mocked APIs)", () => {
     expect(M.oauth.verifyShopifyQueryHmac(p, "test-secret")).toBe(true);
     p.set("shop", "evil.myshopify.com");
     expect(M.oauth.verifyShopifyQueryHmac(p, "test-secret")).toBe(false);
+  });
+
+  it("exchange rates are per store: another tenant's rate never converts this store's spend", async () => {
+    metaCurrency = "EUR";
+    const other = await M.db.store.create({ data: { name: "OTHER STORE", currency: "USD", timezone: TZ } });
+    const today = M.dates.todayIn(TZ);
+    await M.db.exchangeRate.create({ data: { storeId: other.id, base: "EUR", quote: "USD", date: M.dates.toDbDate(M.dates.addDays(today, -3)), rate: 100 } });
+    await M.db.metaConnection.create({ data: { storeId, accessTokenEnc: M.crypto.encryptSecret("meta-token"), status: "ACTIVE" } });
+    await M.meta.refreshAdAccounts(storeId, "meta-token");
+    await M.meta.syncMeta(storeId, "daily", { trigger: "test" });
+    await M.rollup.rebuildAll(storeId, "test");
+    const day = M.dates.addDays(today, -1);
+    const rows = (await M.queries.loadDailyRows(storeId, { from: day, to: day })).rows;
+    expect(rows[0].metaSpend).toBeNull();
+  });
+
+  it("connecting a different Shopify shop resets the cursor and drops the previous shop's orders", async () => {
+    const t = twoDaysAgo();
+    shopOrders = { "3001": makeOrder("3001", t) };
+    await M.shopify.syncShopifyOrders(storeId, { trigger: "test" });
+    expect(await M.db.shopifyOrder.count({ where: { storeId } })).toBe(1);
+    shopOrders = { "4001": makeOrder("4001", t), "4002": makeOrder("4002", t) };
+    await M.integrations.saveShopifyConnection(storeId, `b-${storeId}.myshopify.com`, "shpat_y", "read_orders,read_all_orders");
+    const conn = await M.db.shopifyConnection.findUniqueOrThrow({ where: { storeId } });
+    expect(conn.ordersSyncedThrough).toBeNull();
+    expect(conn.initialImportCompletedAt).toBeNull();
+    await M.shopify.syncShopifyOrders(storeId, { trigger: "test" });
+    const ids = (await M.db.shopifyOrder.findMany({ where: { storeId }, select: { externalId: true } })).map((o) => o.externalId).sort();
+    expect(ids).toEqual(["4001", "4002"]);
+  });
+
+  it("changing the store timezone re-buckets every stored order and refund date", async () => {
+    // 2026-10-04T21:30Z is Oct 5 in Muscat but Oct 4 in New York.
+    shopOrders = { "5001": { ...makeOrder("5001", "2026-10-04T21:30:00Z", new Date().toISOString()), refunds: [{
+      id: "gid://shopify/Refund/51", createdAt: "2026-10-05T22:00:00Z", note: null, totalRefundedSet: money(10), refundShippingLines: { nodes: [] },
+      refundLineItems: { nodes: [] },
+    }] } };
+    await M.shopify.syncSingleOrder(storeId, { shopDomain: `t-${storeId}.myshopify.com`, accessToken: "x" }, "5001", TZ);
+    let o = await M.db.shopifyOrder.findFirstOrThrow({ where: { storeId, externalId: "5001" }, include: { refunds: true } });
+    expect(M.dates.fromDbDate(o.localDate)).toBe("2026-10-05");
+    expect(o.localHour).toBe(1);
+    expect(M.dates.fromDbDate(o.refunds[0].localDate)).toBe("2026-10-06");
+    await M.timezone.rebucketTimezone(storeId, "America/New_York");
+    o = await M.db.shopifyOrder.findFirstOrThrow({ where: { storeId, externalId: "5001" }, include: { refunds: true } });
+    expect(M.dates.fromDbDate(o.localDate)).toBe("2026-10-04");
+    expect(o.localHour).toBe(17);
+    expect(M.dates.fromDbDate(o.refunds[0].localDate)).toBe("2026-10-05");
   });
 });

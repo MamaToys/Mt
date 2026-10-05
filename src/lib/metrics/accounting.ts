@@ -117,16 +117,27 @@ const RESTOCKED = new Set(["RETURN", "CANCEL", "LEGACY_RESTOCK"]);
 
 const NO_FEE_STATUSES = new Set(["VOIDED", "EXPIRED"]);
 
+export interface CampaignLedger {
+  orders: number;
+  netSales: number;
+  productCost: number;
+  unitsMissingCost: number;
+  /** For modelled payment fees / shipping cost of attributed orders. */
+  orderTotals: number;
+  shippingCharged: number;
+  feeOrders: number;
+}
+
 export interface LedgerResult {
   days: Map<DateStr, DayLedger>;
   products: Map<string, ProductDay>; // key `${date}|${productId}`
-  campaigns: Map<string, { orders: number; netSales: number; productCost: number; unitsMissingCost: number }>; // key `${date}|${campaignId}`
+  campaigns: Map<string, CampaignLedger>; // key `${date}|${campaignId}`
 }
 
 export function buildLedger(orders: LedgerOrder[], costOf: CostResolver): LedgerResult {
   const days = new Map<DateStr, DayLedger>();
   const products = new Map<string, ProductDay>();
-  const campaigns = new Map<string, { orders: number; netSales: number; productCost: number; unitsMissingCost: number }>();
+  const campaigns = new Map<string, CampaignLedger>();
 
   const day = (d: DateStr) => {
     let v = days.get(d);
@@ -148,7 +159,7 @@ export function buildLedger(orders: LedgerOrder[], costOf: CostResolver): Ledger
   const camp = (d: DateStr, id: string) => {
     const k = `${d}|${id}`;
     let v = campaigns.get(k);
-    if (!v) campaigns.set(k, (v = { orders: 0, netSales: 0, productCost: 0, unitsMissingCost: 0 }));
+    if (!v) campaigns.set(k, (v = { orders: 0, netSales: 0, productCost: 0, unitsMissingCost: 0, orderTotals: 0, shippingCharged: 0, feeOrders: 0 }));
     return v;
   };
 
@@ -159,8 +170,10 @@ export function buildLedger(orders: LedgerOrder[], costOf: CostResolver): Ledger
     const campaignId = o.attributedCampaignId;
 
     d0.orders += 1;
-    d0.orderTotals += o.totalPrice;
-    if (!NO_FEE_STATUSES.has((o.financialStatus ?? "").toUpperCase())) d0.feeOrders += 1;
+    if (!NO_FEE_STATUSES.has((o.financialStatus ?? "").toUpperCase())) {
+      d0.orderTotals += o.totalPrice;
+      d0.feeOrders += 1;
+    }
     d0.shippingCharged += o.totalShipping;
     d0.taxes += o.totalTax;
     if (o.cancelledLocalDate) d0.cancelledOrders += 1;
@@ -202,6 +215,11 @@ export function buildLedger(orders: LedgerOrder[], costOf: CostResolver): Ledger
     if (campaignId) {
       const c = camp(o.localDate, campaignId);
       c.orders += 1;
+      c.shippingCharged += o.totalShipping;
+      if (!NO_FEE_STATUSES.has((o.financialStatus ?? "").toUpperCase())) {
+        c.orderTotals += o.totalPrice;
+        c.feeOrders += 1;
+      }
       c.netSales += orderNet;
       c.productCost += orderCost;
       c.unitsMissingCost += orderMissing;

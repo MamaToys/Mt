@@ -181,17 +181,19 @@ export async function upsertOrder(storeId: string, n: NormalizedOrder, timeZone:
   return affected;
 }
 
-export async function deleteOrder(storeId: string, externalId: string): Promise<Set<string>> {
+export async function deleteOrder(storeId: string, externalId: string, timeZone: string): Promise<Set<string>> {
   const o = await db.shopifyOrder.findUnique({ where: { storeId_externalId: { storeId, externalId } }, include: { refunds: true } });
   if (!o) return new Set();
   await db.shopifyOrder.delete({ where: { id: o.id } });
-  return new Set([o.localDate.toISOString().slice(0, 10), ...o.refunds.map((r) => r.localDate.toISOString().slice(0, 10))]);
+  const dates = new Set([o.localDate.toISOString().slice(0, 10), ...o.refunds.map((r) => r.localDate.toISOString().slice(0, 10))]);
+  if (o.cancelledAt) dates.add(localDateOf(o.cancelledAt, timeZone));
+  return dates;
 }
 
 /** Fetch + normalise + upsert one order. Used by webhooks and the sync loop. */
 export async function syncSingleOrder(storeId: string, creds: ShopifyCreds, orderId: string, timeZone: string): Promise<Set<string>> {
   const detail = await fetchOrderDetail(creds, orderId);
-  if (!detail) return deleteOrder(storeId, orderId);
+  if (!detail) return deleteOrder(storeId, orderId, timeZone);
   return upsertOrder(storeId, normalizeOrder(detail.order, timeZone), timeZone);
 }
 

@@ -27,6 +27,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams: Pr
         notes={[
           "Meta columns (Purchases, Meta Revenue, Meta ROAS) are Meta-attributed. Shopify columns are actual Shopify orders matched to the campaign by UTM parameters (utm_campaign = campaign ID or exact name) — orders without a match are not assigned to any campaign.",
           "Net Profit per campaign = attributed Shopify net sales − product cost − campaign spend − modelled shipping & payment fees. Fixed overheads are not allocated to campaigns.",
+          ...(data.attributionAvailable && !data.shopifyComplete ? ["Shopify data is incomplete for part of this range, so campaign-level Shopify columns are N/A."] : []),
           data.attributionAvailable
             ? "Attribution is last-visit UTM and will under-count orders Meta influenced without a tagged visit (e.g. view-through, cross-device). Compare with Meta ROAS."
             : "Shopify campaign attribution unavailable: no Shopify orders carry UTM parameters that match your Meta campaigns. In Ads Manager set URL parameters to utm_source=facebook&utm_medium=paid&utm_campaign={{campaign.id}}&utm_term={{adset.id}}&utm_content={{ad.id}}.",

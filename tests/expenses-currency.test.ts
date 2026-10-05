@@ -36,6 +36,9 @@ describe("expenses", () => {
     expect(a.adLinked).toBe(20);
     expect(a.adOverheadRate).toBeCloseTo(0.1);
   });
+  it("fixed expense with unavailable amount (no FX rate) is unavailable, not zero", () => {
+    expect(allocateExpensesForDay([e({ amount: null })], "2026-10-02", base).total).toBeNull();
+  });
   it("percentage with unavailable base is unavailable, not zero", () => {
     const a = allocateExpensesForDay([e({ type: "PERCENTAGE", percent: 10, percentBase: "META_SPEND" })], "2026-10-02", { ...base, metaSpend: null });
     expect(a.total).toBeNull();

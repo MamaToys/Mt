@@ -272,9 +272,14 @@ export function resolveComparison(range: DateRange, mode: CompareMode): DateRang
     case "previous_week":
       return { from: addDays(range.from, -7), to: addDays(range.to, -7) };
     case "previous_month":
-      return { from: addMonths(range.from, -1), to: addMonths(range.to, -1) };
-    case "previous_year":
-      return { from: addMonths(range.from, -12), to: addMonths(range.to, -12) };
+    case "previous_year": {
+      const n = mode === "previous_month" ? -1 : -12;
+      // Whole calendar months compare with whole calendar months (Sep 1–30 → Aug 1–31).
+      if (range.from === startOfMonth(range.from) && range.to === endOfMonth(range.to)) {
+        return { from: addMonths(range.from, n), to: endOfMonth(addMonths(range.to.slice(0, 8) + "01", n)) };
+      }
+      return { from: addMonths(range.from, n), to: addMonths(range.to, n) };
+    }
   }
 }
 

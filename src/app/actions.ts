@@ -7,6 +7,7 @@ import { db } from "@/lib/db";
 import { requireStore, canEdit } from "@/lib/session";
 import { isDateStr, isValidTimeZone, toDbDate } from "@/lib/metrics/dates";
 import { rebuildAll } from "@/lib/sync/rollup";
+import { rebucketTimezone } from "@/lib/sync/timezone";
 import { saveMetaConnection, saveShopifyConnection } from "@/lib/integrations";
 import { normalizeShopDomain } from "@/lib/shopify/client";
 import { runStoreSync } from "@/lib/sync/orchestrator";
@@ -31,6 +32,7 @@ function scheduleRebuild(storeId: string) {
 }
 
 // ───────────────────────────── Settings ─────────────────────────────
+
 
 const SettingsSchema = z.object({
   name: z.string().min(1).max(120),
@@ -68,12 +70,19 @@ export async function saveSettings(_: ActionResult | null, form: FormData): Prom
       return { ok: false, message: "Manual contribution margin must be between 0 and 100 %." };
     }
     const conn = await db.shopifyConnection.findUnique({ where: { storeId: store.id } });
-    if (conn?.shopCurrency && conn.shopCurrency !== s.currency) {
-      const rate = await db.exchangeRate.findFirst({
-        where: { OR: [{ base: conn.shopCurrency, quote: s.currency }, { base: s.currency, quote: conn.shopCurrency }] },
-      });
-      if (!rate) return { ok: false, message: `Reporting currency ${s.currency} differs from the Shopify currency ${conn.shopCurrency}. Add an exchange rate first (Integrations → Exchange rates).` };
+    if (conn && conn.status !== "DISCONNECTED" && conn.shopCurrency && conn.shopCurrency !== s.currency) {
+      // Shopify sales are recorded in the shop currency; reporting in another currency would mix currencies.
+      return { ok: false, message: `The reporting currency must match your Shopify store currency (${conn.shopCurrency}). Meta accounts and costs in other currencies are converted with exchange rates.` };
     }
+    if (s.currency !== store.currency) {
+      const [costs, expenses] = await Promise.all([
+        db.productCost.count({ where: { storeId: store.id, source: "MANUAL", currency: { not: s.currency } } }),
+        db.expense.count({ where: { storeId: store.id, currency: { not: s.currency } } }),
+      ]);
+      if (expenses > 0) return { ok: false, message: `There are ${expenses} expense(s) entered in ${store.currency}. Update or remove them before changing the reporting currency.` };
+      if (costs > 0) return { ok: false, message: `There are ${costs} manual product cost(s) in ${store.currency}; they will only be used with an exchange rate. Add a ${store.currency}→${s.currency} rate or re-enter them, then save again.` };
+    }
+    if (s.timezone !== store.timezone) await rebucketTimezone(store.id, s.timezone);
     await db.store.update({ where: { id: store.id }, data: { name: s.name, currency: s.currency, timezone: s.timezone, weekStartsOn: s.weekStartsOn } });
     await db.storeSettings.upsert({
       where: { storeId: store.id },
@@ -220,8 +229,8 @@ export async function saveFxRate(_: ActionResult | null, form: FormData): Promis
     const { base, quote, date, rate } = p.data;
     if (base === quote) return { ok: false, message: "Currencies must differ." };
     await db.exchangeRate.upsert({
-      where: { base_quote_date: { base, quote, date: toDbDate(date) } },
-      create: { base, quote, date: toDbDate(date), rate: new Prisma.Decimal(rate), source: "manual" },
+      where: { storeId_base_quote_date: { storeId: store.id, base, quote, date: toDbDate(date) } },
+      create: { storeId: store.id, base, quote, date: toDbDate(date), rate: new Prisma.Decimal(rate), source: "manual" },
       update: { rate: new Prisma.Decimal(rate), source: "manual" },
     });
     scheduleRebuild(store.id);
@@ -234,7 +243,7 @@ export async function saveFxRate(_: ActionResult | null, form: FormData): Promis
 
 export async function deleteFxRate(id: string): Promise<void> {
   const { store } = await editor();
-  await db.exchangeRate.delete({ where: { id } });
+  await db.exchangeRate.delete({ where: { id, storeId: store.id } });
   scheduleRebuild(store.id);
   revalidatePath("/integrations");
 }
@@ -289,7 +298,7 @@ export async function disconnect(platform: "shopify" | "meta"): Promise<void> {
 // ───────────────────────────── Alerts ─────────────────────────────
 
 export async function dismissAlert(id: string): Promise<void> {
-  const { store } = await requireStore();
+  const { store } = await editor();
   await db.alert.update({ where: { id, storeId: store.id }, data: { dismissedAt: new Date() } });
   revalidatePath("/", "layout");
 }

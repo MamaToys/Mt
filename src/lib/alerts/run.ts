@@ -22,7 +22,7 @@ export async function runAlerts(storeId: string): Promise<number> {
     loadCampaigns(storeId, { from: addDays(yesterday, -6), to: yesterday }),
     loadCampaigns(storeId, { from: yesterday, to: yesterday }),
   ]);
-  const ySpend = new Map(campaignsY.rows.map((r) => [r.campaignId, r.spend]));
+  const ySpend = new Map(campaignsY.rows.map((r) => [r.campaignId, r.spend ?? 0]));
   const drafts = evaluateAlerts({
     date: yesterday,
     day: day.kpis,
@@ -30,10 +30,10 @@ export async function runAlerts(storeId: string): Promise<number> {
     week: week.kpis,
     prevWeek: prevWeek.kpis,
     attributionAvailable: campaigns7.attributionAvailable,
-    campaigns: campaigns7.rows.map((r) => ({
+    campaigns: campaigns7.rows.filter((r) => r.spend !== null).map((r) => ({
       id: r.campaignId,
       name: r.name,
-      spend7d: r.spend,
+      spend7d: r.spend!,
       purchases7d: r.purchases,
       metaRoas7d: r.metaRoas,
       shopifyRoas7d: r.shopifyRoas,

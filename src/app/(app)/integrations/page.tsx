@@ -24,7 +24,7 @@ export default async function IntegrationsPage({ searchParams }: { searchParams:
     db.shopifyConnection.findUnique({ where: { storeId: store.id } }),
     db.metaConnection.findUnique({ where: { storeId: store.id } }),
     db.metaAdAccount.findMany({ where: { storeId: store.id }, orderBy: { name: "asc" } }),
-    db.exchangeRate.findMany({ orderBy: [{ base: "asc" }, { quote: "asc" }, { date: "desc" }], take: 100 }),
+    db.exchangeRate.findMany({ where: { storeId: store.id }, orderBy: [{ base: "asc" }, { quote: "asc" }, { date: "desc" }], take: 100 }),
   ]);
   const tz = store.timezone;
   const shopActive = shop && shop.status !== "DISCONNECTED";

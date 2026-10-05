@@ -86,6 +86,7 @@ describe("Shopify sales ledger", () => {
     expect(d1.taxes + d2.taxes).toBe(0);
     expect(d1.shippingCharged + d2.shippingCharged).toBe(0);
     expect(d1.feeOrders).toBe(0); // voided → no payment fee
+    expect(d1.orderTotals).toBe(0); // …neither the percentage part
     expect(d1.cancelledOrders).toBe(1);
   });
 
@@ -119,7 +120,7 @@ describe("Shopify sales ledger", () => {
 
   it("attributes UTM-matched orders to the campaign", () => {
     const { campaigns } = buildLedger([order({ attributedCampaignId: "C1" })], cost({ V1: 30 }));
-    expect(campaigns.get("2026-10-01|C1")).toEqual({ orders: 1, netSales: 200, productCost: 60, unitsMissingCost: 0 });
+    expect(campaigns.get("2026-10-01|C1")).toEqual({ orders: 1, netSales: 200, productCost: 60, unitsMissingCost: 0, orderTotals: 230, shippingCharged: 10, feeOrders: 1 });
   });
 
   it("builds product-level rows", () => {

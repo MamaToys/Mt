@@ -75,7 +75,7 @@ async function metaRows(
   where: Prisma.MetaDailyInsightWhereInput,
   storeCurrency: string,
 ): Promise<Map<DateStr, { spend: number | null; purchases: number; value: number | null; impressions: number; clicks: number; linkClicks: number; fxMissing: boolean }>> {
-  const fx = await loadFx();
+  const fx = await loadFx(storeId);
   const rows = await db.metaDailyInsight.findMany({
     where: { ...where, adAccount: { storeId }, date: { gte: toDbDate(range.from), lte: toDbDate(range.to) } },
   });
@@ -148,13 +148,15 @@ export async function loadDailyRows(storeId: string, range: DateRange, filters: 
 
   if (entity) {
     const meta = await metaRows(storeId, range, { level: entity.level, entityExternalId: entity.id }, store.currency);
-    const fx = await loadFx();
+    const attributed = await attributionAvailable(storeId);
+    const fx = await loadFx(storeId);
     const [{ cost }, costOf, ledgerData] = await Promise.all([
       loadCostSettings(storeId),
       loadCostResolver(storeId, store.currency, fx),
       loadLedgerOrders(storeId, range.from, range.to, store.timezone, { [entity.orderField]: entity.id }),
     ]);
     const ledger = buildLedger(ledgerData.orders, costOf);
+    if (!attributed) notes.push("Shopify campaign attribution unavailable: no Shopify orders carry UTM parameters matching your Meta campaigns (or attribution is disabled in Settings). Shopify sales, Shopify ROAS and profit are N/A for this filter.");
     notes.push(
       "Campaign/ad set/ad filter: Meta metrics are for the selected entity. Shopify sales are only the orders whose UTM parameters match it (see Attribution in Definitions). Store overhead expenses are not allocated, so profit here is the contribution after ad spend.",
     );
@@ -164,7 +166,8 @@ export async function loadDailyRows(storeId: string, range: DateRange, filters: 
       rows: base.map((r) => {
         const l = ledger.days.get(r.date);
         const m = meta.get(r.date);
-        const hasS = r.hasShopifyData;
+        // Without working UTM attribution, entity-level Shopify sales are unknown — not zero.
+        const hasS = r.hasShopifyData && attributed;
         const net = hasS ? (l ? netSalesOf(l) : 0) : null;
         return {
           ...emptyRow(r.date),
@@ -206,17 +209,22 @@ export async function loadDailyRows(storeId: string, range: DateRange, filters: 
         rows: base.map((r) => {
           const covered = !!acct.insightsFrom && !!acct.insightsThrough && fromDbDate(acct.insightsFrom) <= r.date && r.date <= fromDbDate(acct.insightsThrough);
           const m = meta.get(r.date);
+          const spend = covered ? (m ? m.spend : 0) : null;
+          // Ad-linked expenses (e.g. agency % of spend) scale with THIS account's spend, not the store total.
+          const rate = r.adLinkedExpenses === null || r.metaSpend === null ? null : r.metaSpend === 0 ? 0 : r.adLinkedExpenses / r.metaSpend;
+          const adLinked = rate === null || spend === null ? null : rate * spend;
           return {
             ...r,
             hasMetaData: covered,
-            metaSpend: covered ? (m ? m.spend : 0) : null,
+            adLinkedExpenses: adLinked,
+            otherExpenses: r.otherExpenses === null || r.adLinkedExpenses === null || adLinked === null ? null : r.otherExpenses - r.adLinkedExpenses + adLinked,
+            metaSpend: spend,
             metaPurchases: covered ? m?.purchases ?? 0 : null,
             metaPurchaseValue: covered ? (m ? m.value : 0) : null,
             metaImpressions: covered ? m?.impressions ?? 0 : null,
             metaClicks: covered ? m?.clicks ?? 0 : null,
             metaLinkClicks: covered ? m?.linkClicks ?? 0 : null,
             metaFxMissing: m?.fxMissing ?? false,
-            // ad-linked expenses scale with total spend; not attributable per account
           };
         }),
       };
@@ -231,6 +239,19 @@ export async function loadPeriod(storeId: string, range: DateRange, filters: Fil
   const settings = await ensureSettings(storeId);
   const result = await loadDailyRows(storeId, range, filters);
   return { result, kpis: computeKpis(sumRows(result.rows), kpiOptions(settings)) };
+}
+
+/** True when every day in the range has complete Shopify data. */
+export async function shopifyCovered(storeId: string, range: DateRange): Promise<boolean> {
+  const n = await db.dailyBusinessMetric.count({ where: { storeId, hasShopifyData: true, date: { gte: toDbDate(range.from), lte: toDbDate(range.to) } } });
+  return n === eachDay(range.from, range.to).length;
+}
+
+/** Campaign-level Shopify revenue exists only when UTM attribution is on and matches at least one order. */
+export async function attributionAvailable(storeId: string): Promise<boolean> {
+  const s = await ensureSettings(storeId);
+  if (!s.utmAttributionEnabled) return false;
+  return (await db.shopifyOrder.count({ where: { storeId, attributedCampaignId: { not: null } }, take: 1 })) > 0;
 }
 
 // ───────────────────────────── Hourly (order-time) ─────────────────────────────
@@ -263,7 +284,8 @@ export interface CampaignRow {
   name: string;
   status: string | null;
   accountId: string;
-  spend: number;
+  /** Null when part of the spend could not be converted (missing exchange rate). */
+  spend: number | null;
   impressions: number;
   clicks: number;
   linkClicks: number;
@@ -283,7 +305,7 @@ export interface CampaignRow {
   fxMissing: boolean;
 }
 
-export async function loadCampaigns(storeId: string, range: DateRange, filters: Filters = {}): Promise<{ rows: CampaignRow[]; attributionAvailable: boolean }> {
+export async function loadCampaigns(storeId: string, range: DateRange, filters: Filters = {}): Promise<{ rows: CampaignRow[]; attributionAvailable: boolean; shopifyComplete: boolean }> {
   const { cost } = await loadCostSettings(storeId);
   const agg = await db.campaignDailyMetric.groupBy({
     by: ["campaignExternalId"],
@@ -296,6 +318,7 @@ export async function loadCampaigns(storeId: string, range: DateRange, filters: 
     _sum: {
       spend: true, impressions: true, clicks: true, linkClicks: true, purchases: true, purchaseValue: true,
       shopifyOrders: true, shopifyNetSales: true, shopifyProductCost: true, shopifyUnitsMissingCost: true,
+      shopifyOrderTotals: true, shopifyShippingCharged: true, shopifyFeeOrders: true,
     },
   });
   const fxMissing = await db.campaignDailyMetric.findMany({
@@ -309,8 +332,9 @@ export async function loadCampaigns(storeId: string, range: DateRange, filters: 
     include: { adAccount: { select: { externalId: true } } },
   });
   const meta = new Map(campaigns.map((c) => [c.externalId, c]));
-  const attributedCount = await db.shopifyOrder.count({ where: { storeId, attributedCampaignId: { not: null } } });
-  const attributionAvailable = attributedCount > 0;
+  const [hasAttribution, shopifyComplete] = await Promise.all([attributionAvailable(storeId), shopifyCovered(storeId, range)]);
+  // Shopify columns need both working attribution and complete Shopify data for the whole range.
+  const showShopify = hasAttribution && shopifyComplete;
 
   const rows = agg.map<CampaignRow>((a) => {
     const c = meta.get(a.campaignExternalId);
@@ -322,26 +346,27 @@ export async function loadCampaigns(storeId: string, range: DateRange, filters: 
     // Missing FX rate: spend for some days could not be converted — ratios are withheld.
     const fx = fxSet.has(a.campaignExternalId);
     const metaRevenue = fx ? null : n(a._sum.purchaseValue) ?? 0;
-    const orders = attributionAvailable ? a._sum.shopifyOrders ?? 0 : null;
-    const revenue = attributionAvailable ? n(a._sum.shopifyNetSales) ?? 0 : null;
+    const orders = showShopify ? a._sum.shopifyOrders ?? 0 : null;
+    const revenue = showShopify ? n(a._sum.shopifyNetSales) ?? 0 : null;
     const productCost = n(a._sum.shopifyProductCost) ?? 0;
     // Campaign contribution: attributed net sales − product cost − ad spend − modelled variable costs.
     const variable =
       revenue === null || orders === null
         ? null
-        : shippingCostForDay(cost, { orders, shippingCharged: 0, netSales: revenue }) + paymentFeesForDay(cost, revenue, orders);
+        : shippingCostForDay(cost, { orders, shippingCharged: n(a._sum.shopifyShippingCharged) ?? 0, netSales: revenue }) +
+          paymentFeesForDay(cost, n(a._sum.shopifyOrderTotals) ?? 0, a._sum.shopifyFeeOrders ?? 0);
     const profit = revenue === null || variable === null || fx ? null : revenue - productCost - spend - variable;
     return {
       campaignId: a.campaignExternalId,
       name: c?.name ?? `Campaign ${a.campaignExternalId}`,
       status: c?.effectiveStatus ?? c?.status ?? null,
       accountId: c?.adAccount.externalId ?? "",
-      spend,
+      spend: fx ? null : spend,
       impressions,
       clicks,
       linkClicks,
       ctr: F.ctr(linkClicks || clicks, impressions),
-      cpc: F.cpc(spend, linkClicks || clicks),
+      cpc: fx ? null : F.cpc(spend, linkClicks || clicks),
       purchases,
       metaRevenue,
       metaRoas: fx ? null : F.metaRoas(metaRevenue, spend),
@@ -356,13 +381,13 @@ export async function loadCampaigns(storeId: string, range: DateRange, filters: 
       fxMissing: fx,
     };
   });
-  return { rows: rows.sort((x, y) => y.spend - x.spend), attributionAvailable };
+  return { rows: rows.sort((x, y) => (y.spend ?? -1) - (x.spend ?? -1)), attributionAvailable: hasAttribution, shopifyComplete };
 }
 
 /** Meta ad set / ad performance (Meta-reported only). */
 export async function loadMetaEntities(storeId: string, range: DateRange, level: "ADSET" | "AD", filters: Filters = {}) {
   const store = await db.store.findUniqueOrThrow({ where: { id: storeId } });
-  const fx = await loadFx();
+  const fx = await loadFx(storeId);
   const rows = await db.metaDailyInsight.findMany({
     where: {
       adAccount: { storeId, isSelected: true, ...(filters.account ? { externalId: filters.account } : {}) },
@@ -409,6 +434,7 @@ export async function loadMetaEntities(storeId: string, range: DateRange, level:
 // ───────────────────────────── Products ─────────────────────────────
 
 export async function loadProducts(storeId: string, range: DateRange) {
+  // Rows are only written for days with complete Shopify data; callers check shopifyCovered() for gaps.
   const agg = await db.productDailyMetric.groupBy({
     by: ["productExternalId"],
     where: { storeId, date: { gte: toDbDate(range.from), lte: toDbDate(range.to) } },

@@ -82,3 +82,15 @@ describe("comparisons", () => {
     expect(D.resolveComparison({ from: "2026-10-01", to: "2026-10-31" }, "none")).toBeNull();
   });
 });
+
+describe("whole-month comparisons", () => {
+  it("Sep 1–30 vs previous month covers all of August", () => {
+    expect(D.resolveComparison({ from: "2026-09-01", to: "2026-09-30" }, "previous_month")).toEqual({ from: "2026-08-01", to: "2026-08-31" });
+  });
+  it("Feb vs previous year handles leap years", () => {
+    expect(D.resolveComparison({ from: "2025-02-01", to: "2025-02-28" }, "previous_year")).toEqual({ from: "2024-02-01", to: "2024-02-29" });
+  });
+  it("month-to-date compares the same days", () => {
+    expect(D.resolveComparison({ from: "2026-10-01", to: "2026-10-05" }, "previous_month")).toEqual({ from: "2026-09-01", to: "2026-09-05" });
+  });
+});

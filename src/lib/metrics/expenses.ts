@@ -61,13 +61,18 @@ export function allocateExpensesForDay(expenses: ExpenseDef[], d: DateStr, bases
   let adLinked: number | null = 0;
   let adOverheadRate = 0;
   const byCategory: Record<string, number> = {};
+  let unavailable = false;
 
   for (const e of expenses) {
     if (!isActiveOn(e, d)) continue;
     let value: number | null = 0;
     if (e.type === "FIXED") {
-      const amount = e.amount ?? 0;
-      value = e.frequency === "MONTHLY" ? amount / daysInMonth(d) : amount;
+      if (e.amount === null) {
+        // Amount unavailable (e.g. no exchange rate for its currency) — never assume 0.
+        unavailable = true;
+        continue;
+      }
+      value = e.frequency === "MONTHLY" ? e.amount / daysInMonth(d) : e.amount;
       fixed += value;
     } else {
       const rate = (e.percent ?? 0) / 100;
@@ -87,7 +92,7 @@ export function allocateExpensesForDay(expenses: ExpenseDef[], d: DateStr, bases
     if (value !== null) byCategory[e.category] = (byCategory[e.category] ?? 0) + value;
   }
 
-  const total = variable === null || adLinked === null ? null : fixed + variable + adLinked;
+  const total = unavailable || variable === null || adLinked === null ? null : fixed + variable + adLinked;
   return { total, fixed, variable, adLinked, adOverheadRate, byCategory };
 }
 

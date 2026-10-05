@@ -15,6 +15,16 @@ export async function saveShopifyConnection(storeId: string, shopDomain: string,
   const shop = await fetchShopInfo({ shopDomain, accessToken });
   const existingOther = await db.shopifyConnection.findUnique({ where: { shopDomain } });
   if (existingOther && existingOther.storeId !== storeId) throw new Error("This Shopify store is already connected to another account.");
+  const current = await db.shopifyConnection.findUnique({ where: { storeId } });
+  if (current && current.shopDomain !== shopDomain) {
+    // A different shop: its orders, products and sync cursor must not mix with the previous shop's.
+    await db.$transaction([
+      db.shopifyOrder.deleteMany({ where: { storeId } }),
+      db.shopifyProduct.deleteMany({ where: { storeId } }),
+      db.productCost.deleteMany({ where: { storeId, source: "SHOPIFY" } }),
+      db.shopifyConnection.delete({ where: { storeId } }),
+    ]);
+  }
   const data = {
     shopDomain,
     accessTokenEnc: encryptSecret(accessToken),

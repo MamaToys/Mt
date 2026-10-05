@@ -85,12 +85,18 @@ export async function runStoreSync(storeId: string, mode: RunMode, trigger: stri
 }
 
 export async function runAllStores(mode: RunMode, trigger: string): Promise<RunSummary[]> {
+  // Least-recently-synced stores first, so no store is starved when time runs out.
   const stores = await db.store.findMany({
     where: { isDemo: false, OR: [{ shopifyConnection: { isNot: null } }, { metaConnection: { isNot: null } }] },
     select: { id: true },
+    orderBy: [{ shopifyConnection: { lastSyncAt: { sort: "asc", nulls: "first" } } }, { updatedAt: "asc" }],
   });
+  const deadline = Date.now() + 240_000;
   const out: RunSummary[] = [];
-  const perStore = Math.max(60_000, Math.floor(240_000 / Math.max(1, stores.length)));
-  for (const s of stores) out.push(await runStoreSync(s.id, mode, trigger, perStore));
+  for (const s of stores) {
+    const left = deadline - Date.now();
+    if (left < 45_000) break; // the rest run on the next invocation
+    out.push(await runStoreSync(s.id, mode, trigger, Math.min(left - 30_000, Math.max(45_000, Math.floor(240_000 / stores.length)))));
+  }
   return out;
 }

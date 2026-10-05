@@ -50,7 +50,7 @@ export async function POST(req: Request) {
       const tz = conn.store.timezone;
       const dates =
         topic === "orders/delete"
-          ? await deleteOrder(conn.storeId, orderId)
+          ? await deleteOrder(conn.storeId, orderId, tz)
           : await syncSingleOrder(conn.storeId, { shopDomain: conn.shopDomain, accessToken: decryptSecret(conn.accessTokenEnc) }, orderId, tz);
       if (conn.initialImportCompletedAt && dates.size) await rebuildForDates(conn.storeId, dates, "webhook");
       if (webhookId) await db.webhookEvent.update({ where: { externalId: webhookId }, data: { processedAt: new Date() } });

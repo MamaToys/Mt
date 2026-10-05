@@ -32,7 +32,7 @@ export async function ensureSettings(storeId: string) {
   return db.storeSettings.upsert({ where: { storeId }, create: { storeId }, update: {} });
 }
 
-export async function loadExpenses(storeId: string): Promise<ExpenseDef[]> {
+export async function loadExpenses(storeId: string, storeCurrency?: string, fx?: FxTable): Promise<ExpenseDef[]> {
   const rows = await db.expense.findMany({ where: { storeId } });
   return rows.map((e) => ({
     id: e.id,
@@ -40,7 +40,8 @@ export async function loadExpenses(storeId: string): Promise<ExpenseDef[]> {
     category: e.category,
     type: e.type,
     frequency: e.frequency,
-    amount: n(e.amount),
+    // Fixed amounts in another currency are converted at the start-date rate; no rate → unavailable.
+    amount: storeCurrency && fx && e.currency !== storeCurrency ? fx.convert(n(e.amount), e.currency, storeCurrency, fromDbDate(e.startDate)) : n(e.amount),
     percent: n(e.percent),
     percentBase: e.percentBase,
     startDate: fromDbDate(e.startDate),
@@ -48,8 +49,8 @@ export async function loadExpenses(storeId: string): Promise<ExpenseDef[]> {
   }));
 }
 
-export async function loadFx(): Promise<FxTable> {
-  const rates = await db.exchangeRate.findMany();
+export async function loadFx(storeId: string): Promise<FxTable> {
+  const rates = await db.exchangeRate.findMany({ where: { storeId } });
   return new FxTable(rates.map((r) => ({ base: r.base, quote: r.quote, date: fromDbDate(r.date), rate: Number(r.rate) })));
 }
 
@@ -155,10 +156,10 @@ export async function rebuildRollups(storeId: string, from: DateStr, to: DateStr
   const log = await startSyncLog(storeId, "SYSTEM", "rollup", trigger);
   try {
     const dates = eachDay(from, to);
-    const fx = await loadFx();
+    const fx = await loadFx(storeId);
     const [{ cost, s }, expenses, costOf, ledgerData] = await Promise.all([
       loadCostSettings(storeId),
-      loadExpenses(storeId),
+      loadExpenses(storeId, store.currency, fx),
       loadCostResolver(storeId, store.currency, fx),
       loadLedgerOrders(storeId, from, to, tz),
     ]);
@@ -263,9 +264,10 @@ export async function rebuildRollups(storeId: string, from: DateStr, to: DateStr
       });
     }
     const campaignAccount = new Map(campaigns.map((c) => [c.externalId, c.adAccount.externalId]));
+    const covered = (d: DateStr) => !!cov && cov.from <= d && d <= cov.to;
     for (const [k, v] of ledger.campaigns) {
       const [d, campaignId] = k.split("|");
-      if (d < from || d > to) continue;
+      if (d < from || d > to || !covered(d)) continue; // incomplete Shopify days are never reported as complete
       const row = campaignRows.get(k) ?? {
         storeId, adAccountExternalId: campaignAccount.get(campaignId) ?? "", campaignExternalId: campaignId, date: toDbDate(d),
         spend: new Prisma.Decimal(0), impressions: BigInt(0), clicks: BigInt(0), linkClicks: null, purchases: null, purchaseValue: null, fxMissing: false,
@@ -274,13 +276,16 @@ export async function rebuildRollups(storeId: string, from: DateStr, to: DateStr
       row.shopifyNetSales = D(v.netSales)!;
       row.shopifyProductCost = D(v.productCost)!;
       row.shopifyUnitsMissingCost = v.unitsMissingCost;
+      row.shopifyOrderTotals = D(v.orderTotals)!;
+      row.shopifyShippingCharged = D(v.shippingCharged)!;
+      row.shopifyFeeOrders = v.feeOrders;
       campaignRows.set(k, row);
     }
 
     const productRows: Prisma.ProductDailyMetricCreateManyInput[] = [];
     for (const [k, p] of ledger.products) {
       const d = k.split("|")[0];
-      if (d < from || d > to) continue;
+      if (d < from || d > to || !covered(d)) continue;
       productRows.push({
         storeId, productExternalId: p.productExternalId, title: p.title, date: toDbDate(d),
         unitsSold: p.unitsSold, unitsReturned: p.unitsReturned, grossSales: D(p.grossSales)!, discounts: D(p.discounts)!,
