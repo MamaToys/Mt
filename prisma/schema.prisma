@@ -1,0 +1,860 @@
+// Shopify + Meta Ads profitability dashboard — database schema.
+//
+// Conventions
+// - Every platform record has an internal `id` (cuid) and an `externalId`
+//   (the platform's own ID) with a unique constraint scoped to its parent so a
+//   re-import UPSERTS instead of inserting a duplicate.
+// - Money is stored as Decimal(18,4) in the currency named on the row. Shopify
+//   amounts are always the *shop* currency (shopMoney), never presentment money.
+// - `localDate` columns are calendar dates in the store's timezone (not UTC).
+// - Rollup tables (Daily*Metric) are derived data; they can be rebuilt at any
+//   time from the raw tables via the rollup job.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────── Auth (better-auth) ───────────────────────────
+
+model User {
+  id            String        @id
+  name          String
+  email         String        @unique
+  emailVerified Boolean       @default(false)
+  image         String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  sessions      Session[]
+  accounts      Account[]
+  memberships   StoreMember[]
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+// ─────────────────────────────── Store & settings ─────────────────────────────
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  VIEWER
+}
+
+model Store {
+  id        String   @id @default(cuid())
+  name      String
+  /// Reporting currency (ISO 4217). Defaults to the Shopify shop currency.
+  currency  String   @default("USD")
+  /// IANA timezone used for every daily bucket. Defaults to the Shopify shop timezone.
+  timezone  String   @default("UTC")
+  /// Week start for weekly aggregation: 0 = Sunday, 1 = Monday.
+  weekStartsOn Int   @default(1)
+  /// True only for the clearly-labelled development demo store.
+  isDemo    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members            StoreMember[]
+  settings           StoreSettings?
+  shopifyConnection  ShopifyConnection?
+  metaConnection     MetaConnection?
+  metaAdAccounts     MetaAdAccount[]
+  orders             ShopifyOrder[]
+  products           ShopifyProduct[]
+  productCosts       ProductCost[]
+  expenses           Expense[]
+  dailyMetrics       DailyBusinessMetric[]
+  campaignMetrics    CampaignDailyMetric[]
+  productMetrics     ProductDailyMetric[]
+  syncLogs           SyncLog[]
+  aiAnalyses         AIAnalysis[]
+  alerts             Alert[]
+  webhookEvents      WebhookEvent[]
+}
+
+model StoreMember {
+  id        String     @id @default(cuid())
+  storeId   String
+  userId    String
+  role      MemberRole @default(OWNER)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  store     Store      @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([storeId, userId])
+  @@index([userId])
+}
+
+enum ShippingCostMode {
+  /// No shipping cost modelled (use Expenses instead).
+  NONE
+  /// A flat cost per order (shippingCostPerOrder).
+  PER_ORDER
+  /// Store pays exactly what the customer was charged for shipping.
+  EQUAL_TO_CHARGED
+  /// Percentage of net sales (shippingCostPercent).
+  PERCENT_OF_NET_SALES
+}
+
+enum BreakEvenMode {
+  /// Contribution margin computed from actual data in the selected period.
+  AUTO
+  /// Contribution margin entered by the user (manualContributionMargin).
+  MANUAL
+}
+
+model StoreSettings {
+  id        String   @id @default(cuid())
+  storeId   String   @unique
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  // Payment processing: fee = percent * order total + fixed per order.
+  paymentFeePercent     Decimal @default(0) @db.Decimal(7, 4)
+  paymentFeeFixed       Decimal @default(0) @db.Decimal(18, 4)
+
+  shippingCostMode      ShippingCostMode @default(NONE)
+  shippingCostPerOrder  Decimal @default(0) @db.Decimal(18, 4)
+  shippingCostPercent   Decimal @default(0) @db.Decimal(7, 4)
+
+  breakEvenMode            BreakEvenMode @default(AUTO)
+  /// 0–1, e.g. 0.40 = 40 % contribution margin before advertising.
+  manualContributionMargin Decimal?      @db.Decimal(7, 4)
+
+  // Targets (null = not set)
+  targetRoas          Decimal? @db.Decimal(10, 4)
+  targetCpa           Decimal? @db.Decimal(18, 4)
+  targetProfitMargin  Decimal? @db.Decimal(7, 4)
+  targetMonthlySales  Decimal? @db.Decimal(18, 2)
+  targetMonthlyProfit Decimal? @db.Decimal(18, 2)
+
+  // Alert thresholds
+  alertDiscrepancyPct        Decimal @default(20) @db.Decimal(7, 2)
+  alertCampaignSpendNoPurch  Decimal @default(100) @db.Decimal(18, 2)
+  alertCampaignDailySpendMax Decimal? @db.Decimal(18, 2)
+  alertCpaIncreasePct        Decimal @default(25) @db.Decimal(7, 2)
+  alertSalesDeclinePct       Decimal @default(20) @db.Decimal(7, 2)
+  alertRefundRatePct         Decimal @default(10) @db.Decimal(7, 2)
+
+  /// Which Shopify order attribute is matched against Meta IDs for
+  /// campaign-level Shopify revenue. See docs/ATTRIBUTION.md.
+  utmAttributionEnabled Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ─────────────────────────────── Connections ──────────────────────────────────
+
+enum ConnectionStatus {
+  PENDING
+  ACTIVE
+  ERROR
+  EXPIRED
+  DISCONNECTED
+}
+
+model ShopifyConnection {
+  id              String           @id @default(cuid())
+  storeId         String           @unique
+  store           Store            @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  shopDomain      String           @unique
+  /// AES-256-GCM encrypted Admin API access token. Never sent to the browser.
+  accessTokenEnc  String
+  scopes          String?
+  status          ConnectionStatus @default(ACTIVE)
+  shopName        String?
+  shopCurrency    String?
+  shopTimezone    String?
+  /// Earliest order date imported (coverage start, store-local date).
+  historyFrom     DateTime?        @db.Date
+  /// Orders have been synced up to this instant (incremental cursor on updated_at).
+  ordersSyncedThrough DateTime?
+  lastSyncAt          DateTime?
+  lastSuccessfulSyncAt DateTime?
+  lastError           String?
+  webhooksRegisteredAt DateTime?
+  syncLockedUntil     DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+}
+
+model MetaConnection {
+  id              String           @id @default(cuid())
+  storeId         String           @unique
+  store           Store            @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  metaUserId      String?
+  metaUserName    String?
+  /// AES-256-GCM encrypted long-lived user / system-user token.
+  accessTokenEnc  String
+  tokenExpiresAt  DateTime?
+  status          ConnectionStatus @default(ACTIVE)
+  lastSyncAt          DateTime?
+  lastSuccessfulSyncAt DateTime?
+  lastError           String?
+  syncLockedUntil     DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+}
+
+// ─────────────────────────────── Shopify data ─────────────────────────────────
+
+model ShopifyOrder {
+  id               String    @id @default(cuid())
+  storeId          String
+  store            Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  /// Numeric Shopify order ID (from gid://shopify/Order/<id>).
+  externalId       String
+  orderNumber      Int?
+  name             String
+  processedAt      DateTime
+  createdAtShopify DateTime
+  updatedAtShopify DateTime
+  cancelledAt      DateTime?
+  cancelReason     String?
+  closedAt         DateTime?
+  test             Boolean   @default(false)
+  financialStatus  String?
+  fulfillmentStatus String?
+  currency         String
+  /// Store-local calendar date of processedAt — the day the sale is reported on.
+  localDate        DateTime  @db.Date
+  /// Store-local hour (0–23) of processedAt, for hourly charts.
+  localHour        Int
+
+  // All amounts in shop currency (shopMoney), as reported by Shopify at the
+  // time of the last sync.
+  /// Sum of line item original price × quantity (Shopify "gross sales").
+  grossSales       Decimal   @db.Decimal(18, 4)
+  totalDiscounts   Decimal   @db.Decimal(18, 4)
+  subtotalPrice    Decimal   @db.Decimal(18, 4)
+  totalShipping    Decimal   @db.Decimal(18, 4)
+  totalTax         Decimal   @db.Decimal(18, 4)
+  totalPrice       Decimal   @db.Decimal(18, 4)
+  totalRefunded    Decimal   @db.Decimal(18, 4)
+  /// Amount actually captured minus refunded (Shopify netPaymentSet).
+  netPayment       Decimal?  @db.Decimal(18, 4)
+  currentTotalPrice Decimal? @db.Decimal(18, 4)
+
+  // Attribution (last visit UTM parameters from Shopify customer journey).
+  utmSource        String?
+  utmMedium        String?
+  utmCampaign      String?
+  utmTerm          String?
+  utmContent       String?
+  landingPage      String?
+  sourceName       String?
+  /// Meta campaign / ad set / ad external IDs matched from UTMs (if any).
+  attributedCampaignId String?
+  attributedAdSetId    String?
+  attributedAdId       String?
+
+  /// Non-reversible hash of the Shopify customer ID (for repeat-rate only).
+  customerHash     String?
+
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  lineItems        ShopifyOrderLineItem[]
+  refunds          ShopifyRefund[]
+
+  @@unique([storeId, externalId])
+  @@index([storeId, localDate])
+  @@index([storeId, updatedAtShopify])
+  @@index([storeId, attributedCampaignId])
+}
+
+model ShopifyOrderLineItem {
+  id               String   @id @default(cuid())
+  orderId          String
+  order            ShopifyOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  externalId       String
+  productExternalId String?
+  variantExternalId String?
+  sku              String?
+  title            String
+  variantTitle     String?
+  quantity         Int
+  /// Original unit price before discounts (shop currency).
+  originalUnitPrice Decimal @db.Decimal(18, 4)
+  /// Discount allocated to this line (shop currency).
+  totalDiscount    Decimal  @db.Decimal(18, 4)
+  /// Unit cost reported by Shopify inventory item at sync time (if any).
+  shopifyUnitCost  Decimal? @db.Decimal(18, 4)
+  isGiftCard       Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  refundLineItems  ShopifyRefundLineItem[]
+
+  @@unique([orderId, externalId])
+  @@index([variantExternalId])
+  @@index([productExternalId])
+  @@index([sku])
+}
+
+model ShopifyRefund {
+  id               String   @id @default(cuid())
+  orderId          String
+  order            ShopifyOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  externalId       String
+  processedAt      DateTime
+  /// Store-local date the refund is reported on (Shopify reports returns on refund date).
+  localDate        DateTime @db.Date
+  /// Money returned to the customer (all transactions).
+  totalRefunded    Decimal  @db.Decimal(18, 4)
+  /// Merchandise returned, before tax (Shopify "returns").
+  lineItemsSubtotal Decimal @db.Decimal(18, 4)
+  lineItemsTax     Decimal  @db.Decimal(18, 4)
+  shippingRefunded Decimal  @db.Decimal(18, 4)
+  note             String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  lineItems        ShopifyRefundLineItem[]
+
+  @@unique([orderId, externalId])
+  @@index([localDate])
+}
+
+model ShopifyRefundLineItem {
+  id          String   @id @default(cuid())
+  refundId    String
+  refund      ShopifyRefund @relation(fields: [refundId], references: [id], onDelete: Cascade)
+  lineItemId  String
+  lineItem    ShopifyOrderLineItem @relation(fields: [lineItemId], references: [id], onDelete: Cascade)
+  externalId  String
+  quantity    Int
+  subtotal    Decimal  @db.Decimal(18, 4)
+  totalTax    Decimal  @db.Decimal(18, 4)
+  restockType String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([refundId, externalId])
+}
+
+model ShopifyProduct {
+  id          String   @id @default(cuid())
+  storeId     String
+  store       Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  externalId  String
+  title       String
+  status      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  variants    ShopifyVariant[]
+
+  @@unique([storeId, externalId])
+}
+
+model ShopifyVariant {
+  id          String   @id @default(cuid())
+  productId   String
+  product     ShopifyProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  externalId  String   @unique
+  sku         String?
+  title       String
+  price       Decimal? @db.Decimal(18, 4)
+  /// Unit cost from Shopify inventory item ("Cost per item"), shop currency.
+  shopifyUnitCost Decimal? @db.Decimal(18, 4)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([sku])
+}
+
+enum CostSource {
+  SHOPIFY
+  MANUAL
+}
+
+/// Product cost per unit. MANUAL rows override SHOPIFY rows for the same variant.
+/// Costs can change over time: the row with the latest effectiveFrom <= sale date wins.
+model ProductCost {
+  id                String     @id @default(cuid())
+  storeId           String
+  store             Store      @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  productExternalId String?
+  variantExternalId String?
+  sku               String?
+  title             String?
+  costPerUnit       Decimal    @db.Decimal(18, 4)
+  currency          String
+  source            CostSource @default(MANUAL)
+  effectiveFrom     DateTime   @default("1970-01-01T00:00:00Z") @db.Date
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  @@unique([storeId, variantExternalId, source, effectiveFrom])
+  @@index([storeId, sku])
+}
+
+// ─────────────────────────────── Meta data ────────────────────────────────────
+
+model MetaAdAccount {
+  id          String   @id @default(cuid())
+  storeId     String
+  store       Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  /// "act_<id>"
+  externalId  String
+  name        String
+  currency    String
+  timezone    String?
+  accountStatus Int?
+  /// Only selected accounts are synced and reported.
+  isSelected  Boolean  @default(true)
+  /// Insights coverage: dates [insightsFrom, insightsThrough] (account timezone) are fully synced.
+  insightsFrom    DateTime? @db.Date
+  insightsThrough DateTime? @db.Date
+  lastInsightsSyncAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  campaigns   MetaCampaign[]
+  adSets      MetaAdSet[]
+  ads         MetaAd[]
+  insights    MetaDailyInsight[]
+
+  @@unique([storeId, externalId])
+}
+
+model MetaCampaign {
+  id              String   @id @default(cuid())
+  adAccountId     String
+  adAccount       MetaAdAccount @relation(fields: [adAccountId], references: [id], onDelete: Cascade)
+  externalId      String
+  name            String
+  status          String?
+  effectiveStatus String?
+  objective       String?
+  dailyBudget     Decimal? @db.Decimal(18, 4)
+  lifetimeBudget  Decimal? @db.Decimal(18, 4)
+  startTime       DateTime?
+  stopTime        DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  adSets          MetaAdSet[]
+
+  @@unique([adAccountId, externalId])
+  @@index([externalId])
+}
+
+model MetaAdSet {
+  id              String   @id @default(cuid())
+  adAccountId     String
+  adAccount       MetaAdAccount @relation(fields: [adAccountId], references: [id], onDelete: Cascade)
+  campaignId      String
+  campaign        MetaCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  externalId      String
+  name            String
+  status          String?
+  effectiveStatus String?
+  dailyBudget     Decimal? @db.Decimal(18, 4)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  ads             MetaAd[]
+
+  @@unique([adAccountId, externalId])
+  @@index([externalId])
+  @@index([campaignId])
+}
+
+model MetaAd {
+  id              String   @id @default(cuid())
+  adAccountId     String
+  adAccount       MetaAdAccount @relation(fields: [adAccountId], references: [id], onDelete: Cascade)
+  adSetId         String
+  adSet           MetaAdSet @relation(fields: [adSetId], references: [id], onDelete: Cascade)
+  externalId      String
+  name            String
+  status          String?
+  effectiveStatus String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([adAccountId, externalId])
+  @@index([externalId])
+  @@index([adSetId])
+}
+
+enum InsightLevel {
+  ACCOUNT
+  CAMPAIGN
+  ADSET
+  AD
+}
+
+/// One row per (account, level, entity, date). Totals must be computed from a
+/// SINGLE level (never sum ACCOUNT + CAMPAIGN rows) to avoid double counting.
+model MetaDailyInsight {
+  id                String       @id @default(cuid())
+  adAccountId       String
+  adAccount         MetaAdAccount @relation(fields: [adAccountId], references: [id], onDelete: Cascade)
+  level             InsightLevel
+  /// External ID of the entity at `level` (account id for ACCOUNT).
+  entityExternalId  String
+  campaignExternalId String?
+  adSetExternalId   String?
+  adExternalId      String?
+  /// Date in the ad account's timezone (Meta reports in account time).
+  date              DateTime     @db.Date
+  /// Account currency.
+  currency          String
+  spend             Decimal      @db.Decimal(18, 4)
+  impressions       BigInt
+  reach             BigInt?
+  frequency         Decimal?     @db.Decimal(10, 4)
+  clicks            BigInt
+  linkClicks        BigInt?
+  ctr               Decimal?     @db.Decimal(10, 4)
+  cpc               Decimal?     @db.Decimal(18, 4)
+  cpm               Decimal?     @db.Decimal(18, 4)
+  purchases         Decimal?     @db.Decimal(18, 4)
+  purchaseValue     Decimal?     @db.Decimal(18, 4)
+  costPerPurchase   Decimal?     @db.Decimal(18, 4)
+  /// Which Meta action type the purchase numbers came from (e.g. omni_purchase).
+  purchaseActionType String?
+  fetchedAt         DateTime     @default(now())
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  @@unique([adAccountId, level, entityExternalId, date])
+  @@index([adAccountId, level, date])
+  @@index([campaignExternalId, date])
+  @@index([adSetExternalId, date])
+  @@index([adExternalId, date])
+}
+
+// ─────────────────────────────── Costs & expenses ─────────────────────────────
+
+enum ExpenseCategory {
+  GOOGLE_ADS
+  TIKTOK_ADS
+  OTHER_ADVERTISING
+  INFLUENCER
+  AGENCY
+  SOFTWARE
+  WAREHOUSE
+  PACKAGING
+  SHIPPING
+  PAYMENT_FEES
+  SALARIES
+  OTHER
+}
+
+enum ExpenseType {
+  /// A fixed amount.
+  FIXED
+  /// A percentage of a base metric (percentBase).
+  PERCENTAGE
+}
+
+enum ExpenseFrequency {
+  ONE_TIME
+  DAILY
+  MONTHLY
+}
+
+enum PercentBase {
+  NET_SALES
+  GROSS_SALES
+  TOTAL_SALES
+  META_SPEND
+}
+
+model Expense {
+  id          String           @id @default(cuid())
+  storeId     String
+  store       Store            @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  name        String
+  category    ExpenseCategory
+  type        ExpenseType
+  frequency   ExpenseFrequency
+  /// FIXED: amount in `currency`.
+  amount      Decimal?         @db.Decimal(18, 4)
+  /// PERCENTAGE: 0–100.
+  percent     Decimal?         @db.Decimal(7, 4)
+  percentBase PercentBase?
+  currency    String
+  /// ONE_TIME: the date it applies to. Recurring: first day it applies.
+  startDate   DateTime         @db.Date
+  /// Recurring: last day it applies (inclusive). Null = ongoing.
+  endDate     DateTime?        @db.Date
+  notes       String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@index([storeId, startDate])
+}
+
+/// Explicit FX rates. A Meta account in a different currency than the store is
+/// only converted when a rate exists for that date (or the nearest prior date).
+model ExchangeRate {
+  id        String   @id @default(cuid())
+  base      String
+  quote     String
+  date      DateTime @db.Date
+  rate      Decimal  @db.Decimal(18, 8)
+  source    String   @default("manual")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([base, quote, date])
+}
+
+// ─────────────────────────────── Rollups ──────────────────────────────────────
+
+/// Precomputed per-day store metrics in the store currency. Null = data not
+/// available (NOT zero).
+model DailyBusinessMetric {
+  id               String   @id @default(cuid())
+  storeId          String
+  store            Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  date             DateTime @db.Date
+
+  hasShopifyData   Boolean  @default(false)
+  hasMetaData      Boolean  @default(false)
+
+  // Shopify sales (Shopify definitions; see docs/METRICS.md)
+  grossSales       Decimal? @db.Decimal(18, 4)
+  discounts        Decimal? @db.Decimal(18, 4)
+  returns          Decimal? @db.Decimal(18, 4)
+  netSales         Decimal? @db.Decimal(18, 4)
+  shippingCharged  Decimal? @db.Decimal(18, 4)
+  taxes            Decimal? @db.Decimal(18, 4)
+  totalSales       Decimal? @db.Decimal(18, 4)
+  refundedAmount   Decimal? @db.Decimal(18, 4)
+  orders           Int?
+  cancelledOrders  Int?
+  refundedOrders   Int?
+  unitsSold        Int?
+
+  // Costs
+  productCost      Decimal? @db.Decimal(18, 4)
+  /// Units sold that had no known cost (product cost is incomplete if > 0).
+  unitsMissingCost Int?
+  shippingCost     Decimal? @db.Decimal(18, 4)
+  paymentFees      Decimal? @db.Decimal(18, 4)
+  otherExpenses    Decimal? @db.Decimal(18, 4)
+  /// Portion of otherExpenses that is variable (percentage-of-sales based).
+  variableExpenses Decimal? @db.Decimal(18, 4)
+  /// Portion of otherExpenses that scales with Meta spend (e.g. agency % of spend).
+  adLinkedExpenses Decimal? @db.Decimal(18, 4)
+
+  // Meta (converted to store currency)
+  metaSpend        Decimal? @db.Decimal(18, 4)
+  metaPurchases    Decimal? @db.Decimal(18, 4)
+  metaPurchaseValue Decimal? @db.Decimal(18, 4)
+  metaImpressions  BigInt?
+  metaClicks       BigInt?
+  metaLinkClicks   BigInt?
+  /// True when a Meta amount could not be converted (missing FX rate).
+  metaFxMissing    Boolean  @default(false)
+
+  computedAt       DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([storeId, date])
+  @@index([storeId, date])
+}
+
+/// Per-campaign, per-day metrics. Meta metrics are Meta-attributed; Shopify
+/// metrics are from UTM-matched orders only (see docs/ATTRIBUTION.md).
+model CampaignDailyMetric {
+  id                 String   @id @default(cuid())
+  storeId            String
+  store              Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  adAccountExternalId String
+  campaignExternalId String
+  date               DateTime @db.Date
+  spend              Decimal  @db.Decimal(18, 4)
+  impressions        BigInt
+  clicks             BigInt
+  linkClicks         BigInt?
+  purchases          Decimal? @db.Decimal(18, 4)
+  purchaseValue      Decimal? @db.Decimal(18, 4)
+  /// Shopify orders whose UTM matched this campaign.
+  shopifyOrders      Int      @default(0)
+  shopifyNetSales    Decimal  @default(0) @db.Decimal(18, 4)
+  shopifyProductCost Decimal  @default(0) @db.Decimal(18, 4)
+  shopifyUnitsMissingCost Int @default(0)
+  fxMissing          Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([storeId, campaignExternalId, date])
+  @@index([storeId, date])
+  @@index([campaignExternalId])
+}
+
+model ProductDailyMetric {
+  id                String   @id @default(cuid())
+  storeId           String
+  store             Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  productExternalId String
+  title             String
+  date              DateTime @db.Date
+  unitsSold         Int
+  unitsReturned     Int
+  grossSales        Decimal  @db.Decimal(18, 4)
+  discounts         Decimal  @db.Decimal(18, 4)
+  returns           Decimal  @db.Decimal(18, 4)
+  netSales          Decimal  @db.Decimal(18, 4)
+  productCost       Decimal  @db.Decimal(18, 4)
+  unitsMissingCost  Int
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([storeId, productExternalId, date])
+  @@index([storeId, date])
+}
+
+// ─────────────────────────────── Ops ──────────────────────────────────────────
+
+enum Platform {
+  SHOPIFY
+  META
+  SYSTEM
+}
+
+enum SyncStatus {
+  RUNNING
+  COMPLETED
+  PARTIAL
+  FAILED
+}
+
+model SyncLog {
+  id              String     @id @default(cuid())
+  storeId         String
+  store           Store      @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  platform        Platform
+  /// e.g. "orders_initial", "orders_incremental", "webhook", "insights_recent", "insights_history", "rollup"
+  syncType        String
+  trigger         String     @default("schedule")
+  status          SyncStatus @default(RUNNING)
+  startedAt       DateTime   @default(now())
+  completedAt     DateTime?
+  recordsImported Int        @default(0)
+  errorMessage    String?
+  details         Json?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([storeId, startedAt])
+  @@index([storeId, platform, status])
+}
+
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  storeId     String
+  store       Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  /// X-Shopify-Webhook-Id — used for idempotency.
+  externalId  String    @unique
+  topic       String
+  resourceId  String?
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+  error       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([storeId, receivedAt])
+}
+
+model AIAnalysis {
+  id          String   @id @default(cuid())
+  storeId     String
+  store       Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  /// "daily_summary" | "question" | "campaign"
+  kind        String
+  question    String?
+  campaignExternalId String?
+  dateFrom    DateTime @db.Date
+  dateTo      DateTime @db.Date
+  /// Exactly the structured metrics sent to the model (for traceability).
+  input       Json
+  output      String
+  model       String
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([storeId, kind, createdAt])
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+model Alert {
+  id          String        @id @default(cuid())
+  storeId     String
+  store       Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  /// Rule key, e.g. "roas_below_break_even".
+  type        String
+  /// Dedup key, e.g. date or campaign id.
+  key         String
+  severity    AlertSeverity
+  title       String
+  message     String
+  date        DateTime      @db.Date
+  data        Json?
+  dismissedAt DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@unique([storeId, type, key])
+  @@index([storeId, date])
+}
