@@ -84,7 +84,7 @@ export async function loadCostResolver(storeId: string, storeCurrency: string, f
 }
 
 /** Loads orders that touch [from, to] via order date, refund date or cancellation. */
-export async function loadLedgerOrders(storeId: string, from: DateStr, to: DateStr, timeZone: string, extraWhere: Prisma.ShopifyOrderWhereInput = {}): Promise<{ orders: LedgerOrder[]; raw: { utmSource: string | null; utmCampaign: string | null; utmTerm: string | null; utmContent: string | null; externalId: string }[] }> {
+export async function loadLedgerOrders(storeId: string, from: DateStr, to: DateStr, timeZone: string, extraWhere: Prisma.ShopifyOrderWhereInput = {}): Promise<{ orders: LedgerOrder[]; raw: { utmSource: string | null; utmCampaign: string | null; utmTerm: string | null; utmContent: string | null; externalId: string; attributedCampaignId: string | null; attributedAdSetId: string | null; attributedAdId: string | null }[] }> {
   const start = toDbDate(from);
   const end = toDbDate(to);
   // Cancellation is stored as a timestamp; widen by a day on each side then filter by local date.
@@ -172,18 +172,25 @@ export async function rebuildRollups(storeId: string, from: DateStr, to: DateStr
     ]);
     if (s.utmAttributionEnabled) {
       const lookup = buildLookup(campaigns, adsets.map((a) => a.externalId), ads.map((a) => a.externalId));
-      const attributionUpdates: { externalId: string; campaignId: string | null; adSetId: string | null; adId: string | null }[] = [];
+      // Persist attribution changes for drill-down filters, batched by target value.
+      const groups = new Map<string, { a: { campaignId: string | null; adSetId: string | null; adId: string | null }; ids: string[] }>();
       ledgerData.orders.forEach((o, i) => {
-        const a = attributeOrder(ledgerData.raw[i], lookup);
+        const raw = ledgerData.raw[i];
+        const a = attributeOrder(raw, lookup);
         o.attributedCampaignId = a.campaignId;
-        attributionUpdates.push({ externalId: o.externalId, campaignId: a.campaignId, adSetId: a.adSetId, adId: a.adId });
+        if (raw.attributedCampaignId === a.campaignId && raw.attributedAdSetId === a.adSetId && raw.attributedAdId === a.adId) return;
+        const key = `${a.campaignId}|${a.adSetId}|${a.adId}`;
+        const g = groups.get(key) ?? { a, ids: [] };
+        g.ids.push(o.externalId);
+        groups.set(key, g);
       });
-      // Persist for drill-down queries (batched).
-      for (const u of attributionUpdates.filter((x) => x.campaignId)) {
-        await db.shopifyOrder.updateMany({
-          where: { storeId, externalId: u.externalId },
-          data: { attributedCampaignId: u.campaignId, attributedAdSetId: u.adSetId, attributedAdId: u.adId },
-        });
+      for (const { a, ids } of groups.values()) {
+        for (let i = 0; i < ids.length; i += 5000) {
+          await db.shopifyOrder.updateMany({
+            where: { storeId, externalId: { in: ids.slice(i, i + 5000) } },
+            data: { attributedCampaignId: a.campaignId, attributedAdSetId: a.adSetId, attributedAdId: a.adId },
+          });
+        }
       }
     }
 
@@ -323,7 +330,17 @@ export async function rebuildRollups(storeId: string, from: DateStr, to: DateStr
 export async function rebuildForDates(storeId: string, dates: Iterable<string>, trigger = "sync"): Promise<number> {
   const list = [...dates].sort();
   if (list.length === 0) return 0;
-  return rebuildRollups(storeId, list[0], list[list.length - 1], trigger);
+  return rebuildChunked(storeId, list[0], list[list.length - 1], trigger);
+}
+
+/** Splits long ranges into ~quarterly windows to bound memory (each window is independent and idempotent). */
+export async function rebuildChunked(storeId: string, from: DateStr, to: DateStr, trigger: string, windowDays = 92): Promise<number> {
+  let n = 0;
+  for (let start = from; start <= to; start = addDays(start, windowDays)) {
+    const end = addDays(start, windowDays - 1);
+    n += await rebuildRollups(storeId, start, end < to ? end : to, trigger);
+  }
+  return n;
 }
 
 /** Full rebuild across the store's entire data coverage (e.g. after settings or cost changes). */
@@ -336,5 +353,5 @@ export async function rebuildAll(storeId: string, trigger = "settings"): Promise
   if (firstOrder) candidates.push(fromDbDate(firstOrder.localDate));
   const today = todayIn(store.timezone);
   const from = candidates.length ? candidates.sort()[0] : addDays(today, -30);
-  return rebuildRollups(storeId, from, today, trigger);
+  return rebuildChunked(storeId, from, today, trigger);
 }
