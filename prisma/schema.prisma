@@ -221,6 +221,10 @@ model ShopifyConnection {
   historyFrom     DateTime?        @db.Date
   /// Orders have been synced up to this instant (incremental cursor on updated_at).
   ordersSyncedThrough DateTime?
+  /// Set once the initial historical import has fully completed. Until then
+  /// Shopify figures are reported as unavailable (never partial).
+  initialImportCompletedAt DateTime?
+  productsSyncedAt    DateTime?
   lastSyncAt          DateTime?
   lastSuccessfulSyncAt DateTime?
   lastError           String?
